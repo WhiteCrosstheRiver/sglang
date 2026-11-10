@@ -65,6 +65,10 @@ from sglang.srt.speculative.dspark_components.dspark_observability import (
     DsparkStepObservers,
     InfoSegment,
 )
+from sglang.srt.speculative.dspark_components.dspark_pd_draft_kv import (
+    RandomDraftKVSeeder,
+    pd_draft_kv_seeded_on_decode,
+)
 from sglang.srt.speculative.dspark_components.dspark_planner import (
     DSparkVerifyPlanner,
     alloc_verify_window,
@@ -162,6 +166,8 @@ class DSparkWorkerV2(BaseSpecWorker):
     num_folded_verify_ids_steps = 0
     num_relayed_in_graph_steps = 0
     _verify_inputs_ready = None
+    _target_only_pd_prefill = False
+    _pd_draft_kv_seeder = None
 
     def weight_update_runners(self) -> list[tuple[str, "ModelRunner"]]:
         return [("draft", self.draft_model_runner)] if self._hosts_draft else []
@@ -191,6 +197,15 @@ class DSparkWorkerV2(BaseSpecWorker):
         if not self._hosts_draft:
             return
 
+        self._is_pd_prefill = get_disagg().disaggregation_mode == "prefill"
+        seeds_pd_draft_kv = pd_draft_kv_seeded_on_decode()
+        if self._is_pd_prefill and seeds_pd_draft_kv:
+            # A prefill whose decode seeds the draft KV itself runs only the target.
+            self._target_only_pd_prefill = True
+            self._hosts_draft = False
+            self._tp_sync = SpecTpSync(get_dp_tp_group())
+            return
+
         self._draft_is_moe = draft_uses_compressed_kv_attention()
         self.draft_parallel_layout = resolve_draft_parallel_layout(
             model_draft_parallel_spec(
@@ -199,7 +214,6 @@ class DSparkWorkerV2(BaseSpecWorker):
                 dspark_is_moe=self._draft_is_moe,
             )
         )
-        self._is_pd_prefill = get_disagg().disaggregation_mode == "prefill"
         self._decode_graph_allowed = (
             get_exec().graph.cuda_graph_config.decode.backend != Backend.DISABLED
             and not self._is_pd_prefill
@@ -349,6 +363,8 @@ class DSparkWorkerV2(BaseSpecWorker):
             verify_num_draft_tokens=self.verify_num_draft_tokens,
             block_pos_offsets=self._block_pos_offsets,
         )
+        if seeds_pd_draft_kv:
+            self._pd_draft_kv_seeder = self._build_pd_draft_kv_seeder()
         self._simulate_acc_len = float(envs.SGLANG_SIMULATE_ACC_LEN.get())
         # The step's simulated correct length, read by the eager and graph accepts.
         self._simulated_correct_len = (
@@ -528,6 +544,34 @@ class DSparkWorkerV2(BaseSpecWorker):
         if self._is_pd_prefill and not self._draft_is_moe:
             self.draft_model.prune_to_ctx_kv_injection()
 
+    def _build_pd_draft_kv_seeder(self) -> RandomDraftKVSeeder:
+        if self._draft_is_moe:
+            raise ValueError(
+                "--speculative-dspark-pd-draft-kv-source random requires a dense "
+                "DSpark draft; a DeepSeek-V4 (MoE) draft transfers its draft KV."
+            )
+        return RandomDraftKVSeeder(
+            kv_injector=self._kv_injector,
+            draft_context=self._draft_context,
+            feature_size=int(
+                self.draft_model.num_context_features
+                * self.draft_model.config.hidden_size
+            ),
+            seed=self.target_worker.random_seed,
+            dtype=self.draft_model_runner.dtype,
+            device=self.device,
+        )
+
+    @property
+    def pd_transfer_draft_kv_pool(self) -> Optional[object]:
+        if self._pd_draft_kv_seeder is not None:
+            return None
+        return self.primary_draft_kv_pool
+
+    def seed_pd_draft_kv(self, batch: ScheduleBatch) -> None:
+        if self._pd_draft_kv_seeder is not None:
+            self._pd_draft_kv_seeder.seed(batch)
+
     def _resolve_target_embed_tokens(self, target_model):
         if hasattr(target_model, "get_input_embeddings"):
             return target_model.get_input_embeddings()
@@ -691,6 +735,10 @@ class DSparkWorkerV2(BaseSpecWorker):
         *,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> GenerationBatchResult:
+        if self._target_only_pd_prefill:
+            return self._forward_target_only_prefill(
+                batch, on_publish, pp_proxy_tensors
+            )
         if not self._hosts_draft:
             batch_output = self.target_worker.forward_batch_generation(
                 batch,
@@ -717,6 +765,34 @@ class DSparkWorkerV2(BaseSpecWorker):
             return self._forward_prefill(batch, on_publish, pp_proxy_tensors)
 
         return self._forward_decode(batch, on_publish, grammar_barrier)
+
+    def _forward_target_only_prefill(
+        self,
+        batch: ScheduleBatch,
+        on_publish,
+        pp_proxy_tensors: Optional[PPProxyTensors],
+    ) -> GenerationBatchResult:
+        # Same capture mode as a draft-hosting prefill, so the target runs the
+        # forward and graphs that path is served with.
+        batch_output = self.target_worker.forward_batch_generation(
+            batch,
+            pp_proxy_tensors=pp_proxy_tensors,
+            capture_hidden_mode=CaptureHiddenMode.FULL,
+        )
+        next_token_ids = batch_output.next_token_ids
+        self._tp_sync.sync(SpecTpSyncSite.DSPARK_TARGET, next_token_ids)
+        batch_output.new_seq_lens = batch.seq_lens
+        if on_publish is not None:
+            on_publish(batch_output.new_seq_lens)
+        if batch_output.logits_output is not None:
+            # Nothing reads the captured states here; do not copy them to CPU.
+            batch_output.logits_output.hidden_states = None
+            batch_output.logits_output.hidden_states_token_indices = None
+        batch_output.next_draft_input = make_next_draft_input(
+            bonus_tokens=next_token_ids,
+            new_seq_lens=batch_output.new_seq_lens,
+        )
+        return batch_output
 
     def _forward_dp_spec_prefill_coordination(
         self, batch, plan, on_publish, grammar_barrier, pp_proxy_tensors

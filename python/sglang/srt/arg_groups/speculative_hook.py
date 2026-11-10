@@ -676,6 +676,15 @@ def _handle_dspark(server_args: ServerArgs) -> None:
             "DSpark speculative decoding only supports CUDA, NPU or XPU device."
         )
 
+    if (
+        cfg.speculative_dspark_pd_draft_kv_source == "random"
+        and cfg.disaggregation_mode not in ("prefill", "decode")
+    ):
+        raise ValueError(
+            "--speculative-dspark-pd-draft-kv-source random requires "
+            "--disaggregation-mode prefill or decode."
+        )
+
     if cfg.attn_dp_size > 1:
         if not cfg.enable_dp_lm_head:
             raise ValueError("DSpark with dp attention requires --enable-dp-lm-head.")

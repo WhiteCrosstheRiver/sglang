@@ -24,18 +24,30 @@ DSPARK = {
     "algorithm": "DSPARK",
     "num_draft_entries": 6,
 }
+DSPARK_RANDOM = {
+    "algorithm": "DSPARK",
+    "draft_kv_source": "random",
+}
 SENTINEL_QUERY = dict.fromkeys(
     ("prefill_dp_rank", "prefill_cp_rank", "target_tp_rank", "target_pp_rank"), "-1"
 )
 
 
-def layout(algorithm, *, num_draft_entries=6, num_draft_tokens=5, block_size_flag=4):
+def layout(
+    algorithm,
+    *,
+    num_draft_entries=6,
+    num_draft_tokens=5,
+    block_size_flag=4,
+    **server_args_fields,
+):
     kv_args = SimpleNamespace(num_draft_entries=num_draft_entries)
     with published_topology(
         speculative_algorithm=algorithm,
         speculative_num_draft_tokens=num_draft_tokens,
         speculative_dspark_block_size=block_size_flag,
         speculative_dflash_block_size=None,
+        **server_args_fields,
     ):
         return get_spec_kv_layout(kv_args)
 
@@ -109,8 +121,45 @@ class TestSpecKVLayout(CustomTestCase):
             {**DSPARK, "algorithm": "DFLASH"},
         )
 
+    def test_decode_seeded_draft_kv_publishes_on_draftless_ranks(self):
+        """A draftless rank publishes None, which skips the check; both roles of a
+        decode-seeded pair hold no draft entries and must still be compared."""
+        random_source = dict(speculative_dspark_pd_draft_kv_source="random")
+        for mode, num_draft_entries in (("prefill", 0), ("decode", 6)):
+            with self.subTest(mode=mode):
+                self.assertEqual(
+                    layout(
+                        "DSPARK",
+                        num_draft_entries=num_draft_entries,
+                        disaggregation_mode=mode,
+                        **random_source,
+                    ),
+                    DSPARK_RANDOM,
+                )
+        # DFLASH has no decode-side seeding: the flag must not change its layout.
+        self.assertEqual(
+            layout(
+                "DFLASH",
+                block_size_flag=None,
+                disaggregation_mode="decode",
+                **random_source,
+            ),
+            {**DSPARK, "algorithm": "DFLASH"},
+        )
+
     def test_decode_compares_only_published_layouts(self):
         cases = {
+            "matched decode-seeded DSpark": (DSPARK_RANDOM, DSPARK_RANDOM, None),
+            "decode seeds, prefill ships draft KV": (
+                DSPARK_RANDOM,
+                DSPARK,
+                "mismatch",
+            ),
+            "decode expects draft KV, prefill ships none": (
+                DSPARK,
+                DSPARK_RANDOM,
+                "mismatch",
+            ),
             "ordinary PD or decode-only EAGLE": ({}, None, None),
             "matched DSpark": (DSPARK, DSPARK, None),
             "legacy, target-only, or draftless prefill": (DSPARK, None, None),

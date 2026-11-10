@@ -1628,7 +1628,7 @@ class Scheduler(
             )
 
         draft_token_to_kv_pool = (
-            self.draft_worker.primary_draft_kv_pool
+            self.draft_worker.pd_transfer_draft_kv_pool
             if self.draft_worker is not None
             else None
         )

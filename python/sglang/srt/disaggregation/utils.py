@@ -1902,6 +1902,19 @@ def get_spec_kv_layout(kv_args: KVArgs) -> Optional[dict]:
     algorithm = SpeculativeAlgorithm.from_string(spec.speculative_algorithm)
     if not algorithm.is_dflash_family():
         return {}
+    if algorithm.is_dspark():
+        from sglang.srt.speculative.dspark_components.dspark_pd_draft_kv import (
+            PD_DRAFT_KV_SOURCE_RANDOM,
+            pd_draft_kv_seeded_on_decode,
+        )
+
+        if pd_draft_kv_seeded_on_decode():
+            # No draft entry crosses the wire, yet both roles must have agreed
+            # to that: a prefill that ships draft KV would not pair with decode.
+            return {
+                "algorithm": algorithm.name,
+                "draft_kv_source": PD_DRAFT_KV_SOURCE_RANDOM,
+            }
     if not kv_args.num_draft_entries:
         return None
     # No block size: prefill writes draft KV per token, unlike DSV4.1's SWA ring.

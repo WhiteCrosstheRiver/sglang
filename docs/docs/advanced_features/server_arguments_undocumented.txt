@@ -78,6 +78,7 @@
 --speculative-dspark-align-verify-tokens-to-graph-tier
 --speculative-dspark-block-size
 --speculative-dspark-confidence-sts-path
+--speculative-dspark-pd-draft-kv-source
 --speculative-dspark-sps-table-path
 --speculative-use-rejection-sampling
 --startup-weight-load-mode

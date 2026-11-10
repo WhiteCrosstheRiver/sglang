@@ -1528,7 +1528,8 @@ class CommonKVManager(BaseKVManager):
                 f"spec_kv_layout={info.spec_kv_layout}, but decode server has "
                 f"spec_kv_layout={self.spec_kv_layout}. DSpark and DFLASH decode "
                 "read the draft KV their prefill writes, so both servers must use "
-                "the same speculative algorithm and draft KV layout."
+                "the same speculative algorithm, draft KV layout and "
+                "--speculative-dspark-pd-draft-kv-source."
             )
 
         # Every send path rejects head-sharded MXFP8 block scales across

@@ -79,6 +79,18 @@ class Spec(msgspec.Struct):
         Optional[int],
         "DSPARK only. Draft block size gamma (number of proposed draft tokens). The verify window is gamma + 1, so this sets --speculative-num-draft-tokens = gamma + 1. Omit to auto-infer gamma from the draft checkpoint block_size.",
     ] = None
+    speculative_dspark_pd_draft_kv_source: A[
+        Literal["transfer", "random"],
+        "DSPARK with PD disaggregation only. Where a decode server's draft "
+        "context KV for the transferred prompt comes from. 'transfer' (default): "
+        "the prefill server projects the target hidden states and ships the "
+        "draft KV with the target KV. 'random': the prefill server hosts no "
+        "draft and the decode server seeds the prompt's draft KV from fixed "
+        "random hidden states, for topologies whose draft KV layouts differ "
+        "between the two roles; output stays lossless, the accept length is "
+        "lower until committed tokens fill the draft context. Set the same "
+        "value on both roles.",
+    ] = "transfer"
     speculative_dspark_sps_table_path: A[
         Optional[str],
         "DSPARK only. Path to a pre-profiled SPS cost table (JSON) built offline with "

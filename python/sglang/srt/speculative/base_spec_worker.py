@@ -17,6 +17,7 @@ from sglang.srt.model_executor.graph_memory_usage import (
 from sglang.srt.runtime_context import get_disagg, get_exec, get_memory, get_schedule
 
 if TYPE_CHECKING:
+    from sglang.srt.managers.schedule_batch import ScheduleBatch
     from sglang.srt.managers.tp_worker import TpModelWorker
     from sglang.srt.model_executor.model_runner import (
         ModelRunner,
@@ -196,6 +197,14 @@ class BaseSpecWorker(ABC):
         if draft_runners[0].runner_ids.is_fused_draft:
             return None
         return draft_runners[0].token_to_kv_pool
+
+    @property
+    def pd_transfer_draft_kv_pool(self) -> Optional[object]:
+        """The draft KV pool PD transfer registers; None when no draft KV is shipped."""
+        return self.primary_draft_kv_pool
+
+    def seed_pd_draft_kv(self, batch: ScheduleBatch) -> None:
+        """Fill the draft KV of a PD decode batch whose prefill shipped none."""
 
     @property
     def target_worker(self) -> TpModelWorker:

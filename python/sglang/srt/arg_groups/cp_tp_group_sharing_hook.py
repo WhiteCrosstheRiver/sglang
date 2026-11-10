@@ -9,6 +9,9 @@ from sglang.srt.arg_groups.overrides import declare_resolution
 from sglang.srt.configs.hybrid_arch import mambaish_config
 from sglang.srt.environ import envs
 from sglang.srt.model_executor.cuda_graph_config import Backend, Phase, with_phase
+from sglang.srt.speculative.dspark_components.dspark_pd_draft_kv import (
+    is_pd_draft_kv_seeded_on_decode,
+)
 
 # Architectures whose model code implements CP-TP group sharing: the CP group
 # is the TP group, the residual stream / attention / indexer are CP-sharded,
@@ -50,11 +53,22 @@ def resolve_cp_tp_group_sharing(server_args: Any, model: Any) -> None:
         raise ValueError(f"CP-TP group sharing requires --cp-strategy {strategy}.")
 
     arch = model.hf_config.architectures[0]
+    # A DSpark PD prefill whose decode seeds the draft KV hosts no draft, so it
+    # runs the target exactly as a DFLASH prefill does.
+    dspark_target_only_prefill = (
+        arch == "Glm5NextForConditionalGeneration"
+        and cfg.disaggregation_mode == "prefill"
+        and is_pd_draft_kv_seeded_on_decode(
+            speculative_algorithm=cfg.speculative_algorithm,
+            disaggregation_mode=cfg.disaggregation_mode,
+            draft_kv_source=cfg.speculative_dspark_pd_draft_kv_source,
+        )
+    )
     # This hook runs before speculative defaults and NEXTN alias resolution.
     # Native MTP keeps the target's CP/TP placement. DFLASH consumes the
     # target's gathered hidden states and runs its draft with ordinary TP.
     # Both integrated and PD prefill consume the CP-gathered target states.
-    if cfg.speculative_algorithm is not None:
+    if cfg.speculative_algorithm is not None and not dspark_target_only_prefill:
         if arch == "KimiK31ForConditionalGeneration":
             if cfg.speculative_algorithm.upper() != "DFLASH":
                 raise ValueError(
@@ -98,8 +112,8 @@ def resolve_cp_tp_group_sharing(server_args: Any, model: Any) -> None:
                 "disaggregation-transfer-backend != mooncake": (
                     cfg.disaggregation_transfer_backend != "mooncake"
                 ),
-                "speculative-algorithm != DFLASH": cfg.speculative_algorithm
-                != "DFLASH",
+                "speculative-algorithm != DFLASH": cfg.speculative_algorithm != "DFLASH"
+                and not dspark_target_only_prefill,
                 "pp-size > 1": cfg.pp_size > 1,
                 "dp-size > 1": cfg.dp_size > 1,
                 "ep-size > 1": view.ep_size > 1,
